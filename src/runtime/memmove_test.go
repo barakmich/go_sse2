@@ -317,6 +317,15 @@ func BenchmarkMemmoveUnalignedSrc(b *testing.B) {
 	})
 }
 
+func BenchmarkMemmoveUnalignedDstBackwards(b *testing.B) {
+	benchmarkSizes(b, bufSizes, func(b *testing.B, n int) {
+		x := make([]byte, n+1)
+		for i := 0; i < b.N; i++ {
+			copy(x[1:], x)
+		}
+	})
+}
+
 func TestMemclr(t *testing.T) {
 	size := 512
 	if testing.Short() {
