@@ -8,7 +8,10 @@ import (
 	"internal/cpu"
 )
 
-var useAVXmemmove bool
+var (
+	useAVXmemmove  bool
+	useSSE2memmove bool
+)
 
 func init() {
 	// Let's remove stepping and reserved fields
@@ -21,4 +24,5 @@ func init() {
 		processor == 0x306E0
 
 	useAVXmemmove = cpu.X86.HasAVX && !isIntelBridgeFamily
+	useSSE2memmove = cpu.X86.HasSSE2 && !useAVXmemmove
 }
