@@ -75,14 +75,7 @@ tail:
  * check and set for backwards
  */
 	CMPQ	SI, DI
-	JA	forward
-/*
- * check overlap
- */
-	MOVQ	SI, CX
-	ADDQ	BX, CX
-	CMPQ	CX, DI
-	JA	sse2Backward
+	JLS	backward
 
 /*
  * forward copy loop
@@ -114,6 +107,15 @@ fwdBy8:
 	REP;	MOVSQ
 	JMP	tail
 
+backward:
+/*
+ * check overlap
+ */
+	MOVQ	SI, CX
+	ADDQ	BX, CX
+	CMPQ	CX, DI
+	JLS	forward
+	JMP	sse2Backward
 
 move_1or2:
 	MOVB	(SI), AX
