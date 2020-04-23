@@ -71,12 +71,18 @@ tail:
 
 	TESTB	$1, runtime·useAVXmemmove(SB)
 	JNZ	avxUnaligned
-
 /*
  * check and set for backwards
  */
 	CMPQ	SI, DI
-	JLS	back
+	JA	forward
+/*
+ * check overlap
+ */
+	MOVQ	SI, CX
+	ADDQ	BX, CX
+	CMPQ	CX, DI
+	JA	sse2Backward
 
 /*
  * forward copy loop
@@ -108,42 +114,6 @@ fwdBy8:
 	REP;	MOVSQ
 	JMP	tail
 
-back:
-/*
- * check overlap
- */
-	MOVQ	SI, CX
-	ADDQ	BX, CX
-	CMPQ	CX, DI
-	JLS	forward
-
-	TESTB	$1, runtime·useSSE2memmove(SB)
-	JNZ	sse2Backward
-/*
- * whole thing backwards has
- * adjusted addresses
- */
-	ADDQ	BX, DI
-	ADDQ	BX, SI
-	STD
-
-/*
- * copy
- */
-	MOVQ	BX, CX
-	SHRQ	$3, CX
-	ANDQ	$7, BX
-
-	SUBQ	$8, DI
-	SUBQ	$8, SI
-	REP;	MOVSQ
-
-	CLD
-	ADDQ	$8, DI
-	ADDQ	$8, SI
-	SUBQ	BX, DI
-	SUBQ	BX, SI
-	JMP	tail
 
 move_1or2:
 	MOVB	(SI), AX
@@ -287,6 +257,59 @@ move_256through2048:
 	LEAQ	256(DI), DI
 	JGE	move_256through2048
 	JMP	tail
+
+sse2Backward:
+	// This is a smaller, SSE2 version of the AVX memmove, above.
+	//
+	// This is only for backwards copies -- on machines where SSE2
+	// is available and AVX is not (or not preferable), eg,
+	// [Nehalem, Haswell), this makes for a modest speedup.
+	//
+	// It's a push on forward, overlapping copies and overall slower
+	// on memcpy use cases (non-overlapping).
+	MOVQ	DI, AX
+	MOVOU	(SI), X5
+	MOVOU	0x10(SI), X6
+	ADDQ	BX, DI
+	MOVOU	0x20(SI), X7
+	MOVOU	0x30(SI), X8
+	LEAQ	-0x10(DI), R10
+	MOVQ	DI, R11
+	MOVOU	0x40(SI), X9
+	MOVOU	0x50(SI), X10
+	ANDQ	$0x0F, R11
+	MOVOU	0x60(SI), X11
+	MOVOU	0x70(SI), X12
+	XORQ	R11, DI
+	ADDQ	BX, SI
+	MOVOU	-0x10(SI), X4
+	SUBQ	R11, SI
+	SUBQ	R11, BX
+	SUBQ	$0x80, BX
+sse2_mem_bwd_loop:
+	MOVOU	-0x10(SI), X0
+	MOVOU	-0x20(SI), X1
+	MOVOU	-0x30(SI), X2
+	MOVOU	-0x40(SI), X3
+	SUBQ	$0x40, SI
+	MOVAPS	X0, -0x10(DI)
+	MOVAPS	X1, -0x20(DI)
+	MOVAPS	X2, -0x30(DI)
+	MOVAPS	X3, -0x40(DI)
+	SUBQ	$0x40, DI
+	SUBQ	$0x40, BX
+	JA	sse2_mem_bwd_loop
+	// Let's store unaligned data
+	MOVOU	X4, (R10)
+	MOVOU	X5, (AX)
+	MOVOU	X6, 0x10(AX)
+	MOVOU	X7, 0x20(AX)
+	MOVOU	X8, 0x30(AX)
+	MOVOU	X9, 0x40(AX)
+	MOVOU	X10, 0x50(AX)
+	MOVOU	X11, 0x60(AX)
+	MOVOU	X12, 0x70(AX)
+	RET
 
 avxUnaligned:
 	// There are two implementations of move algorithm.
@@ -527,55 +550,3 @@ gobble_big_mem_bwd_loop:
 	MOVOU	X12, 0x70(AX)
 	RET
 
-sse2Backward:
-	// This is a smaller, SSE2 version of the AVX memmove, above.
-	//
-	// This is only for backwards copies -- on machines where SSE2
-	// is available and AVX is not (or not preferable), eg,
-	// [Nehalem, Haswell), this makes for a modest speedup.
-	//
-	// It's a push on forward, overlapping copies and overall slower
-	// on memcpy use cases (non-overlapping).
-	MOVQ	DI, AX
-	MOVOU	(SI), X5
-	MOVOU	0x10(SI), X6
-	ADDQ	BX, DI
-	MOVOU	0x20(SI), X7
-	MOVOU	0x30(SI), X8
-	LEAQ	-0x10(DI), R10
-	MOVQ	DI, R11
-	MOVOU	0x40(SI), X9
-	MOVOU	0x50(SI), X10
-	ANDQ	$0x0F, R11
-	MOVOU	0x60(SI), X11
-	MOVOU	0x70(SI), X12
-	XORQ	R11, DI
-	ADDQ	BX, SI
-	MOVOU	-0x10(SI), X4
-	SUBQ	R11, SI
-	SUBQ	R11, BX
-	SUBQ	$0x80, BX
-sse2_mem_bwd_loop:
-	MOVOU	-0x10(SI), X0
-	MOVOU	-0x20(SI), X1
-	MOVOU	-0x30(SI), X2
-	MOVOU	-0x40(SI), X3
-	SUBQ	$0x40, SI
-	MOVAPS	X0, -0x10(DI)
-	MOVAPS	X1, -0x20(DI)
-	MOVAPS	X2, -0x30(DI)
-	MOVAPS	X3, -0x40(DI)
-	SUBQ	$0x40, DI
-	SUBQ	$0x40, BX
-	JA	sse2_mem_bwd_loop
-	// Let's store unaligned data
-	MOVOU	X4, (R10)
-	MOVOU	X5, (AX)
-	MOVOU	X6, 0x10(AX)
-	MOVOU	X7, 0x20(AX)
-	MOVOU	X8, 0x30(AX)
-	MOVOU	X9, 0x40(AX)
-	MOVOU	X10, 0x50(AX)
-	MOVOU	X11, 0x60(AX)
-	MOVOU	X12, 0x70(AX)
-	RET
