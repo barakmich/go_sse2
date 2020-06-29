@@ -37,281 +37,98 @@ TEXT runtime·memmove(SB), NOSPLIT, $0-24
 	MOVQ	from+8(FP), SI
 	MOVQ	n+16(FP), BX
 
-	// REP instructions have a high startup cost, so we handle small sizes
-	// with some straightline code. The REP MOVSQ instruction is really fast
-	// for large sizes. The cutover is approximately 2K.
-tail:
-	// move_129through256 or smaller work whether or not the source and the
-	// destination memory regions overlap because they load all data into
-	// registers before writing it back.  move_256through2048 on the other
-	// hand can be used only when the memory regions don't overlap or the copy
-	// direction is forward.
-	//
-	// BSR+branch table make almost all memmove/memclr benchmarks worse. Not worth doing.
-	TESTQ	BX, BX
-	JEQ	move_0
-	CMPQ	BX, $2
-	JBE	move_1or2
-	CMPQ	BX, $4
-	JB	move_3
-	JBE	move_4
-	CMPQ	BX, $8
-	JB	move_5through7
-	JE	move_8
-	CMPQ	BX, $16
-	JBE	move_9through16
-	CMPQ	BX, $32
-	JBE	move_17through32
-	CMPQ	BX, $64
-	JBE	move_33through64
-	CMPQ	BX, $128
-	JBE	move_65through128
+	CMPL	BX, $16
+	JBE	len_0_16
+	CMPL	BX, $32
+	JBE	mm_16_32
+	CMPL	BX, $64
+	JBE	mm_32_64
+	CMPL	BX, $128
+	JBE	mm_64_128
 	CMPQ	BX, $256
-	JBE	move_129through256
+	JBE	sse2Unaligned
 
 	TESTB	$1, runtime·useAVXmemmove(SB)
 	JNZ	avxUnaligned
-/*
- * check and set for backwards
- */
-	CMPQ	SI, DI
-	JLS	backward
+	JMP	sse2Unaligned
 
-/*
- * forward copy loop
- */
-forward:
-	CMPQ	BX, $2048
-	JLS	move_256through2048
-
-	// If REP MOVSB isn't fast, don't use it
-	CMPB	internal∕cpu·X86+const_offsetX86HasERMS(SB), $1 // enhanced REP MOVSB/STOSB
-	JNE	fwdBy8
-
-	// Check alignment
-	MOVL	SI, AX
-	ORL	DI, AX
-	TESTL	$7, AX
-	JEQ	fwdBy8
-
-	// Do 1 byte at a time
-	MOVQ	BX, CX
-	REP;	MOVSB
-	RET
-
-fwdBy8:
-	// Do 8 bytes at a time
-	MOVQ	BX, CX
-	SHRQ	$3, CX
-	ANDQ	$7, BX
-	REP;	MOVSQ
-	JMP	tail
-
-backward:
-/*
- * check overlap
- */
-	MOVQ	SI, CX
-	ADDQ	BX, CX
-	CMPQ	CX, DI
-	JLS	forward
-	JMP	sse2Backward
-
-move_1or2:
-	MOVB	(SI), AX
-	MOVB	-1(SI)(BX*1), CX
-	MOVB	AX, (DI)
+len_0_16:
+	TESTB	$24, BX 
+	JNZ	len_9_16
+	TESTB	$4, BX
+	// Possible Align nops
+	JNZ	len_5_8
+	TESTL	BX, BX
+	JE	small_ret
+	TESTB	$2, BX
+	// Possible align
+	JNE	len_3_4
+	MOVBLZX -1(SI)(BX*1), CX
+	MOVBLZX (SI), AX
 	MOVB	CX, -1(DI)(BX*1)
+	MOVB    AX, (DI)
+small_ret:
 	RET
-move_0:
-	RET
-move_4:
-	MOVL	(SI), AX
-	MOVL	AX, (DI)
-	RET
-move_3:
-	MOVW	(SI), AX
-	MOVB	2(SI), CX
+
+len_3_4:
+	MOVWLZX -2(SI)(BX*1), CX
+	MOVWLZX (SI), AX
+	MOVW	CX, -2(DI)(BX*1)
 	MOVW	AX, (DI)
-	MOVB	CX, 2(DI)
 	RET
-move_5through7:
-	MOVL	(SI), AX
-	MOVL	-4(SI)(BX*1), CX
-	MOVL	AX, (DI)
-	MOVL	CX, -4(DI)(BX*1)
+
+len_9_16:
+	MOVQ	(SI), CX
+	MOVQ	-8(SI)(BX*1), AX
+	MOVQ	CX, (DI)
+	MOVQ	AX, -8(DI)(BX*1)
 	RET
-move_8:
-	// We need a separate case for 8 to make sure we write pointers atomically.
-	MOVQ	(SI), AX
-	MOVQ	AX, (DI)
+
+len_5_8:
+	MOVL	(SI), CX
+	MOVL	-4(SI)(BX*1), AX
+	MOVL	CX, (DI)
+	MOVL	AX, -4(DI)(BX*1)
 	RET
-move_9through16:
-	MOVQ	(SI), AX
-	MOVQ	-8(SI)(BX*1), CX
-	MOVQ	AX, (DI)
-	MOVQ	CX, -8(DI)(BX*1)
-	RET
-move_17through32:
+
+mm_16_32:
 	MOVOU	(SI), X0
-	MOVOU	-16(SI)(BX*1), X1
+	MOVOU   -16(SI)(BX*1), X1
 	MOVOU	X0, (DI)
 	MOVOU	X1, -16(DI)(BX*1)
 	RET
-move_33through64:
-	MOVOU	(SI), X0
-	MOVOU	16(SI), X1
-	MOVOU	-32(SI)(BX*1), X2
-	MOVOU	-16(SI)(BX*1), X3
-	MOVOU	X0, (DI)
-	MOVOU	X1, 16(DI)
-	MOVOU	X2, -32(DI)(BX*1)
-	MOVOU	X3, -16(DI)(BX*1)
-	RET
-move_65through128:
-	MOVOU	(SI), X0
-	MOVOU	16(SI), X1
-	MOVOU	32(SI), X2
-	MOVOU	48(SI), X3
-	MOVOU	-64(SI)(BX*1), X4
-	MOVOU	-48(SI)(BX*1), X5
-	MOVOU	-32(SI)(BX*1), X6
-	MOVOU	-16(SI)(BX*1), X7
-	MOVOU	X0, (DI)
-	MOVOU	X1, 16(DI)
-	MOVOU	X2, 32(DI)
-	MOVOU	X3, 48(DI)
-	MOVOU	X4, -64(DI)(BX*1)
-	MOVOU	X5, -48(DI)(BX*1)
-	MOVOU	X6, -32(DI)(BX*1)
-	MOVOU	X7, -16(DI)(BX*1)
-	RET
-move_129through256:
-	MOVOU	(SI), X0
-	MOVOU	16(SI), X1
-	MOVOU	32(SI), X2
-	MOVOU	48(SI), X3
-	MOVOU	64(SI), X4
-	MOVOU	80(SI), X5
-	MOVOU	96(SI), X6
-	MOVOU	112(SI), X7
-	MOVOU	-128(SI)(BX*1), X8
-	MOVOU	-112(SI)(BX*1), X9
-	MOVOU	-96(SI)(BX*1), X10
-	MOVOU	-80(SI)(BX*1), X11
-	MOVOU	-64(SI)(BX*1), X12
-	MOVOU	-48(SI)(BX*1), X13
-	MOVOU	-32(SI)(BX*1), X14
-	MOVOU	-16(SI)(BX*1), X15
-	MOVOU	X0, (DI)
-	MOVOU	X1, 16(DI)
-	MOVOU	X2, 32(DI)
-	MOVOU	X3, 48(DI)
-	MOVOU	X4, 64(DI)
-	MOVOU	X5, 80(DI)
-	MOVOU	X6, 96(DI)
-	MOVOU	X7, 112(DI)
-	MOVOU	X8, -128(DI)(BX*1)
-	MOVOU	X9, -112(DI)(BX*1)
-	MOVOU	X10, -96(DI)(BX*1)
-	MOVOU	X11, -80(DI)(BX*1)
-	MOVOU	X12, -64(DI)(BX*1)
-	MOVOU	X13, -48(DI)(BX*1)
-	MOVOU	X14, -32(DI)(BX*1)
-	MOVOU	X15, -16(DI)(BX*1)
-	RET
-move_256through2048:
-	SUBQ	$256, BX
-	MOVOU	(SI), X0
-	MOVOU	16(SI), X1
-	MOVOU	32(SI), X2
-	MOVOU	48(SI), X3
-	MOVOU	64(SI), X4
-	MOVOU	80(SI), X5
-	MOVOU	96(SI), X6
-	MOVOU	112(SI), X7
-	MOVOU	128(SI), X8
-	MOVOU	144(SI), X9
-	MOVOU	160(SI), X10
-	MOVOU	176(SI), X11
-	MOVOU	192(SI), X12
-	MOVOU	208(SI), X13
-	MOVOU	224(SI), X14
-	MOVOU	240(SI), X15
-	MOVOU	X0, (DI)
-	MOVOU	X1, 16(DI)
-	MOVOU	X2, 32(DI)
-	MOVOU	X3, 48(DI)
-	MOVOU	X4, 64(DI)
-	MOVOU	X5, 80(DI)
-	MOVOU	X6, 96(DI)
-	MOVOU	X7, 112(DI)
-	MOVOU	X8, 128(DI)
-	MOVOU	X9, 144(DI)
-	MOVOU	X10, 160(DI)
-	MOVOU	X11, 176(DI)
-	MOVOU	X12, 192(DI)
-	MOVOU	X13, 208(DI)
-	MOVOU	X14, 224(DI)
-	MOVOU	X15, 240(DI)
-	CMPQ	BX, $256
-	LEAQ	256(SI), SI
-	LEAQ	256(DI), DI
-	JGE	move_256through2048
-	JMP	tail
 
-sse2Backward:
-	// This is a smaller, SSE2 version of the AVX memmove, above.
-	//
-	// This is only for backwards copies -- on machines where SSE2
-	// is available and AVX is not (or not preferable), eg,
-	// [Nehalem, Haswell), this makes for a modest speedup.
-	//
-	// It's a push on forward, overlapping copies and overall slower
-	// on memcpy use cases (non-overlapping).
-	MOVQ	DI, AX
-	MOVOU	(SI), X5
-	MOVOU	0x10(SI), X6
-	ADDQ	BX, DI
-	MOVOU	0x20(SI), X7
-	MOVOU	0x30(SI), X8
-	LEAQ	-0x10(DI), R10
-	MOVQ	DI, R11
-	MOVOU	0x40(SI), X9
-	MOVOU	0x50(SI), X10
-	ANDQ	$0x0F, R11
-	MOVOU	0x60(SI), X11
-	MOVOU	0x70(SI), X12
-	XORQ	R11, DI
-	ADDQ	BX, SI
-	MOVOU	-0x10(SI), X4
-	SUBQ	R11, SI
-	SUBQ	R11, BX
-	SUBQ	$0x80, BX
-sse2_mem_bwd_loop:
-	MOVOU	-0x10(SI), X0
-	MOVOU	-0x20(SI), X1
-	MOVOU	-0x30(SI), X2
-	MOVOU	-0x40(SI), X3
-	SUBQ	$0x40, SI
-	MOVAPS	X0, -0x10(DI)
-	MOVAPS	X1, -0x20(DI)
-	MOVAPS	X2, -0x30(DI)
-	MOVAPS	X3, -0x40(DI)
-	SUBQ	$0x40, DI
-	SUBQ	$0x40, BX
-	JA	sse2_mem_bwd_loop
-	// Let's store unaligned data
-	MOVOU	X4, (R10)
-	MOVOU	X5, (AX)
-	MOVOU	X6, 0x10(AX)
-	MOVOU	X7, 0x20(AX)
-	MOVOU	X8, 0x30(AX)
-	MOVOU	X9, 0x40(AX)
-	MOVOU	X10, 0x50(AX)
-	MOVOU	X11, 0x60(AX)
-	MOVOU	X12, 0x70(AX)
+mm_32_64:
+	MOVOU   (SI), X0
+	MOVOU   16(SI), X1
+	MOVOU   -16(SI)(BX*1), X2
+	MOVOU   -32(SI)(BX*1), X3
+	MOVOU   X0, (DI)
+	MOVOU   X1, 16(DI)
+	MOVOU   X2, -16(DI)(BX*1)
+	MOVOU   X3, -32(DI)(BX*1)
 	RET
+
+mm_64_128:
+	MOVOU   (SI), X0
+	MOVOU   16(SI), X1
+	MOVOU   32(SI), X2
+	MOVOU   48(SI), X3
+	MOVOU   -64(SI)(BX*1), X4
+	MOVOU   -48(SI)(BX*1), X5
+	MOVOU   -32(SI)(BX*1), X6
+	MOVOU   -16(SI)(BX*1), X7
+	MOVOU   X0, (DI)
+	MOVOU   X1, 16(DI)
+	MOVOU   X2, 32(DI)
+	MOVOU   X3, 48(DI)
+	MOVOU   X4, -64(DI)(BX*1)
+	MOVOU   X5, -48(DI)(BX*1)
+	MOVOU   X6, -32(DI)(BX*1)
+	MOVOU   X7, -16(DI)(BX*1)
+	RET
+
+
 
 avxUnaligned:
 	// There are two implementations of move algorithm.
@@ -322,7 +139,7 @@ avxUnaligned:
 	// Now CX contains distance between SRC and DEST
 	CMPQ	CX, BX
 	// If the distance lesser than region length it means that regions are overlapped
-	JC	copy_backward
+	JC	avx_backward
 
 	// Non-temporal copy would be better for big sizes.
 	CMPQ	BX, $0x100000
@@ -360,7 +177,7 @@ avxUnaligned:
 	MOVOU	-0x80(CX), X5
 	MOVOU	-0x70(CX), X6
 	MOVQ	$0x80, AX
-	// Align destination address
+	// Align destination address to register width.
 	ANDQ	$-32, DI
 	ADDQ	$32, DI
 	// Continue tail saving.
@@ -469,7 +286,7 @@ gobble_mem_fwd_loop:
 	MOVOU	X12, -0x10(CX)
 	RET
 
-copy_backward:
+avx_backward:
 	MOVQ	DI, AX
 	// Backward copying is about the same as the forward one.
 	// Firstly we load unaligned tail in the beginning of region.
@@ -552,3 +369,98 @@ gobble_big_mem_bwd_loop:
 	MOVOU	X12, 0x70(AX)
 	RET
 
+sse2Unaligned:
+	// Test if it's within extent; if so, go backwards, else forwards.
+	MOVQ	DI, CX
+	SUBQ	SI, CX
+	// Now CX contains distance between SRC and DEST
+	CMPQ	CX, BX
+	// If the distance lesser than region length it means that regions are overlapped
+	JC	sse2_backward
+	//CMPQ	BX, $0x100000
+	//JAE	sse2_big_data_fwd
+
+sse2_forward:
+	LEAQ	(SI)(BX*1), CX
+	MOVQ	DI, R10
+	MOVOU	-0x40(CX), X5
+	MOVOU	-0x30(CX), X6
+	MOVQ	$64, AX
+
+	ANDQ	$-16, DI
+	ADDQ	$16, DI
+
+	MOVOU	-0x20(CX), X7
+	MOVOU	-0x10(CX), X8
+	MOVQ	DI, R11
+	SUBQ	R10, R11
+	SUBQ	R11, BX
+	MOVOU	(SI), X4
+	ADDQ	R11, SI
+	SUBQ	AX, BX
+
+sse2_main_fwd:
+	PREFETCHT0 128(SI)
+	MOVOU	(SI), X0
+	MOVOU	16(SI), X1
+	MOVOU	32(SI), X2
+	MOVOU	48(SI), X3
+	ADDQ	AX, SI
+	MOVAPS	X0, (DI)
+	MOVAPS	X1, 16(DI)
+	MOVAPS	X2, 32(DI)
+	MOVAPS	X3, 48(DI)
+	ADDQ	AX, DI
+	SUBQ	AX, BX
+	JA	sse2_main_fwd
+	ADDQ	AX, BX
+	ADDQ	DI, BX
+	MOVOU	X4, (R10)
+	MOVOU	X5, -0x40(BX)
+	MOVOU	X6, -0x30(BX)
+	MOVOU	X7, -0x20(BX)
+	MOVOU	X8, -0x10(BX)
+	RET
+
+
+
+sse2_backward:
+	MOVQ	DI, AX
+	// Backward copying is about the same as the forward one.
+	// Firstly we load unaligned tail in the beginning of region.
+	MOVOU	(SI), X5
+	MOVOU	0x10(SI), X6
+	ADDQ	BX, DI
+	MOVOU	0x20(SI), X7
+	MOVOU	0x30(SI), X8
+	LEAQ	-0x10(DI), R10
+	MOVQ	DI, R11
+	ANDQ	$0x0F, R11
+	XORQ	R11, DI
+	// Let's point SI to the end of region
+	ADDQ	BX, SI
+	// and load unaligned head into X4.
+	MOVOU	-0x10(SI), X4
+	SUBQ	R11, SI
+	SUBQ	R11, BX
+	SUBQ	$0x40, BX
+sse2_mem_bwd_loop:
+	MOVOU	-0x10(SI), X0
+	MOVOU	-0x20(SI), X1
+	MOVOU	-0x30(SI), X2
+	MOVOU	-0x40(SI), X3
+	SUBQ	$0x40, SI
+	MOVAPS	X0, -0x10(DI)
+	MOVAPS	X1, -0x20(DI)
+	MOVAPS	X2, -0x30(DI)
+	MOVAPS	X3, -0x40(DI)
+	SUBQ	$0x40, DI
+	SUBQ	$0x40, BX
+	JA		sse2_mem_bwd_loop
+	// Let's store unaligned data
+	MOVOU	X4, (R10)
+	MOVOU	X5, (AX)
+	MOVOU	X6, 0x10(AX)
+	MOVOU	X7, 0x20(AX)
+	MOVOU	X8, 0x30(AX)
+	RET
